@@ -1,6 +1,5 @@
 """
-Chat Agent Backend with Real Prefect Flow Orchestration
-Demonstrates pause/resume functionality with WebSocket communication
+Chat Agent Backend with Prefect Pause/Resume
 """
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,16 +9,20 @@ from typing import Dict, Optional
 from datetime import datetime
 import uuid
 import os
+from pydantic import BaseModel
 
-from prefect import flow, task, get_run_logger, pause_flow_run
-from prefect.input import RunInput
-from prefect.client.schemas.objects import State
+from prefect.client import get_client
 import json
 
-# Store WebSocket connections
+# Import the flow from the flows module
+from app.flows.chat_flow import chat_pause_resume_flow
+
+# Store WebSocket connections (must be here for flow to access)
 websocket_manager: Dict[str, WebSocket] = {}
-# Store flow states
-flow_states: Dict[str, dict] = {}  # session_id -> flow state
+# Store flow run IDs
+flow_runs: Dict[str, str] = {}  # session_id -> flow_run_id
+# Store flow tasks
+flow_tasks: Dict[str, asyncio.Task] = {}  # session_id -> task
 
 # Set Prefect API URL if provided
 if os.getenv("PREFECT_API_URL"):
@@ -27,193 +30,23 @@ if os.getenv("PREFECT_API_URL"):
     prefect.settings.PREFECT_API_URL = os.getenv("PREFECT_API_URL")
 
 
-class UserMessage(RunInput):
-    """Input model for user messages during pause"""
-    message: str
-
-
-@task(name="process-message", log_prints=True)
-async def process_message(message: str, session_id: str, interaction: int):
-    """Process user message"""
-    print(f"[TASK] Processing message for {session_id}: {message}")
-    
-    # Send status via WebSocket
-    if session_id in websocket_manager:
-        await websocket_manager[session_id].send_json({
-            "type": "task_status",
-            "task": "process-message",
-            "message": "Processing your message...",
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    await asyncio.sleep(2)
-    return {"message": message, "word_count": len(message.split()), "interaction": interaction}
-
-
-@task(name="analyze-sentiment", log_prints=True)
-async def analyze_sentiment(context: dict, session_id: str):
-    """Analyze sentiment"""
-    print(f"[TASK] Analyzing sentiment for {session_id}")
-    
-    if session_id in websocket_manager:
-        await websocket_manager[session_id].send_json({
-            "type": "task_status",
-            "task": "analyze-sentiment",
-            "message": "Analyzing sentiment...",
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    await asyncio.sleep(1.5)
-    
-    message = context["message"].lower()
-    if "?" in message:
-        sentiment = "curious"
-    elif any(word in message for word in ["thanks", "great", "good", "love"]):
-        sentiment = "positive"
-    elif any(word in message for word in ["bad", "wrong", "issue", "problem"]):
-        sentiment = "negative"
-    else:
-        sentiment = "neutral"
-    
-    print(f"[TASK] Sentiment detected: {sentiment}")
-    return sentiment
-
-
-@task(name="generate-response", log_prints=True)
-async def generate_response(context: dict, sentiment: str, session_id: str):
-    """Generate response"""
-    print(f"[TASK] Generating response for {session_id}")
-    
-    if session_id in websocket_manager:
-        await websocket_manager[session_id].send_json({
-            "type": "task_status",
-            "task": "generate-response",
-            "message": "Generating response...",
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    await asyncio.sleep(2)
-    
-    interaction = context["interaction"]
-    if interaction == 1:
-        response = f"Hello! I received: '{context['message']}' ({sentiment} sentiment). This Prefect flow is now pausing. Send another message to resume!"
-    elif interaction == 2:
-        response = f"Thanks for resuming! You said: '{context['message']}' ({sentiment}). This demonstrates Prefect's pause/resume functionality."
-    else:
-        response = f"Interaction #{interaction}: Your {sentiment} message has been processed through the Prefect flow."
-    
-    print(f"[TASK] Generated response: {response}")
-    return response
-
-
-@flow(name="chat-conversation-flow", log_prints=True)
-async def chat_conversation_flow(session_id: str, initial_message: str):
-    """
-    Main chat flow with pause/resume capability
-    """
-    print(f"\n[FLOW] Starting conversation flow for {session_id}")
-    
-    conversation_history = []
-    interaction = 0
-    message = initial_message
-    
-    while interaction < 10:  # Safety limit
-        interaction += 1
-        print(f"\n[FLOW] === Interaction {interaction} ===")
-        
-        # Send flow status
-        if session_id in websocket_manager:
-            await websocket_manager[session_id].send_json({
-                "type": "status",
-                "message": f"{'Starting' if interaction == 1 else 'Resuming'} Prefect flow (interaction {interaction})...",
-                "timestamp": datetime.now().isoformat()
-            })
-        
-        # Execute tasks
-        print("[FLOW] Executing task 1: process_message")
-        context = await process_message(message, session_id, interaction)
-        
-        print("[FLOW] Executing task 2: analyze_sentiment")
-        sentiment = await analyze_sentiment(context, session_id)
-        
-        print("[FLOW] Executing task 3: generate_response")
-        response = await generate_response(context, sentiment, session_id)
-        
-        # Send response
-        if session_id in websocket_manager:
-            await websocket_manager[session_id].send_json({
-                "type": "agent_message",
-                "message": response,
-                "interaction": interaction,
-                "sentiment": sentiment,
-                "timestamp": datetime.now().isoformat()
-            })
-        
-        # Store in history
-        conversation_history.append({
-            "interaction": interaction,
-            "user": message,
-            "agent": response,
-            "sentiment": sentiment,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Check for exit
-        if any(word in message.lower() for word in ["exit", "goodbye", "bye"]):
-            print("[FLOW] User requested exit")
-            if session_id in websocket_manager:
-                await websocket_manager[session_id].send_json({
-                    "type": "status",
-                    "message": "Flow completed. Thank you for chatting!"
-                })
-            break
-        
-        # Pause and wait for user input
-        print("[FLOW] Pausing flow to wait for user input...")
-        if session_id in websocket_manager:
-            await websocket_manager[session_id].send_json({
-                "type": "status",
-                "message": "Flow paused. Send a message to resume..."
-            })
-        
-        # Store flow state
-        flow_states[session_id] = {
-            "status": "paused",
-            "interaction": interaction,
-            "waiting_for_input": True
-        }
-        
-        # Pause the flow
-        user_input = await pause_flow_run(
-            wait_for_input=UserMessage,
-            timeout=300  # 5 minute timeout
-        )
-        
-        if not user_input:
-            print("[FLOW] Timeout waiting for user input")
-            break
-        
-        message = user_input.message
-        print(f"[FLOW] Received user input: {message}")
-    
-    print(f"[FLOW] Flow completed for {session_id}")
-    return {
-        "session_id": session_id,
-        "total_interactions": interaction,
-        "history": conversation_history
-    }
+class WebSocketUpdate(BaseModel):
+    """Model for internal WebSocket updates"""
+    session_id: str
+    type: str
+    data: dict
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Starting Chat Agent with Real Prefect Flows...")
+    print("Starting Chat Agent with Prefect Pause/Resume...")
     yield
     print("Shutting down...")
 
 
 app = FastAPI(
-    title="Chat Agent with Prefect Orchestration",
-    version="2.0.0",
+    title="Chat Agent with Prefect Pause/Resume",
+    version="5.0.0",
     lifespan=lifespan
 )
 
@@ -228,15 +61,26 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health_check():
+    """Health check endpoint"""
+    prefect_connected = False
+    try:
+        async with get_client() as client:
+            await client.read_flow_runs(limit=1)
+            prefect_connected = True
+    except:
+        pass
+    
     return {
         "status": "healthy",
         "active_sessions": len(websocket_manager),
-        "paused_flows": len([s for s in flow_states.values() if s.get("status") == "paused"])
+        "active_flows": len(flow_runs),
+        "prefect_connected": prefect_connected
     }
 
 
 @app.post("/api/chat/start")
 async def start_chat_session():
+    """Start a new chat session"""
     session_id = f"session_{uuid.uuid4().hex[:8]}"
     print(f"\n=== NEW SESSION: {session_id} ===\n")
     return {
@@ -245,12 +89,32 @@ async def start_chat_session():
     }
 
 
-# Global storage for flow tasks
-flow_tasks: Dict[str, asyncio.Task] = {}
+@app.post("/api/internal/websocket-update")
+async def internal_websocket_update(update: WebSocketUpdate):
+    """Internal endpoint for flows to send WebSocket updates"""
+    if update.session_id in websocket_manager:
+        await send_to_websocket(update.session_id, update.type, update.data)
+        return {"status": "sent"}
+    return {"status": "no_connection"}
+
+
+async def send_to_websocket(session_id: str, msg_type: str, content: dict):
+    """Helper to send messages to WebSocket if connected"""
+    if session_id in websocket_manager:
+        try:
+            await websocket_manager[session_id].send_json({
+                "type": msg_type,
+                **content,
+                "timestamp": datetime.now().isoformat()
+            })
+            print(f"[WS] Sent {msg_type} to {session_id}")
+        except Exception as e:
+            print(f"[WS] Error sending to {session_id}: {e}")
 
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for real-time chat"""
     await websocket.accept()
     websocket_manager[session_id] = websocket
     print(f"\n=== WEBSOCKET CONNECTED: {session_id} ===\n")
@@ -258,46 +122,84 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     try:
         while True:
             data = await websocket.receive_json()
-            print(f"\n=== RECEIVED: {data} ===\n")
+            print(f"\n=== RECEIVED: {json.dumps(data, indent=2)} ===\n")
             
             if data.get("type") == "user_message":
                 message = data.get("message", "")
                 
-                if session_id not in flow_tasks:
+                if session_id not in flow_runs:
                     # First message - start new flow
-                    print(f"\n[WS] Starting new Prefect flow for {session_id}")
+                    print(f"[WS] Starting new Prefect flow for {session_id}")
+                    print(f"[WS] Initial message: {message}")
                     
-                    # Create and start the flow
-                    flow_task = asyncio.create_task(
-                        chat_conversation_flow(session_id, message)
-                    )
-                    flow_tasks[session_id] = flow_task
-                    
-                    # Don't wait for the flow to complete (it will pause)
-                    print(f"[WS] Flow started and running in background")
-                    
+                    try:
+                        # Create and start the flow, passing the flow_runs dict
+                        flow_task = asyncio.create_task(
+                            chat_pause_resume_flow(
+                                session_id=session_id, 
+                                initial_message=message,
+                                flow_runs_dict=flow_runs
+                            )
+                        )
+                        flow_tasks[session_id] = flow_task
+                        
+                        print(f"[WS] Flow started in background")
+                        
+                        # The flow will communicate via WebSocket
+                        
+                    except Exception as e:
+                        print(f"[WS] Error starting flow: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Failed to start flow: {str(e)}"
+                        })
+                
                 else:
                     # Resume existing flow
-                    print(f"[WS] Flow is paused, waiting for resume signal")
-                    # In a real implementation, we'd use Prefect's API to resume
-                    # For now, the flow is waiting for input via pause_flow_run
+                    flow_run_id = flow_runs[session_id]
+                    print(f"[WS] Attempting to resume flow {flow_run_id}")
+                    print(f"[WS] Resume message: {message}")
                     
-                    await websocket.send_json({
-                        "type": "status",
-                        "message": "Resume functionality requires Prefect Cloud/Server integration"
-                    })
+                    try:
+                        async with get_client() as client:
+                            # Resume the paused flow with the new message
+                            flow_run = await client.read_flow_run(flow_run_id)
+                            
+                            if flow_run.state.is_paused():
+                                print(f"[WS] Flow is paused, resuming with message: {message}")
+                                await client.resume_flow_run(
+                                    flow_run_id,
+                                    run_input={"message": message}
+                                )
+                                print(f"[WS] Resume command sent successfully")
+                            else:
+                                print(f"[WS] Flow is in state: {flow_run.state.name}")
+                                await websocket.send_json({
+                                    "type": "status",
+                                    "message": f"Flow is {flow_run.state.name}, cannot resume"
+                                })
+                            
+                    except Exception as e:
+                        print(f"[WS] Error resuming flow: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Failed to resume flow: {str(e)}"
+                        })
                 
     except WebSocketDisconnect:
-        print(f"WebSocket disconnected: {session_id}")
+        print(f"[WS] WebSocket disconnected: {session_id}")
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"[WS] WebSocket error: {e}")
         import traceback
         traceback.print_exc()
     finally:
         websocket_manager.pop(session_id, None)
-        if session_id in flow_tasks:
-            flow_tasks[session_id].cancel()
-            flow_tasks.pop(session_id)
+        # Clean up but don't cancel the flow task - let it complete or timeout
+        print(f"[WS] Cleaned up connection for {session_id}")
 
 
 if __name__ == "__main__":

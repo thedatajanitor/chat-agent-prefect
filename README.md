@@ -37,59 +37,48 @@ docker-compose up -d
 
 ## Implementation Details
 
-### Current Implementation (main_final.py)
+### How Status Updates Work
 
-The current implementation provides true Prefect pause/resume functionality:
+**Status updates come DIRECTLY from the Prefect flow itself:**
+- Each Prefect task calls `send_to_websocket()` to send real-time updates
+- The flow has direct access to the WebSocket connections
+- No polling or external tracking - updates are pushed from within the flow execution
+
+### Implementation (main.py)
+
+The implementation provides true Prefect pause/resume functionality:
 - Each chat session creates a single Prefect flow that persists across messages
 - The flow pauses after processing each message using `pause_flow_run()`
 - When a new message arrives, the flow resumes with the input using Prefect's API
 - Full task visibility and orchestration through Prefect dashboard
 - WebSocket updates sent directly from flow tasks
 
-### Simple Implementation (main_simple.py)
-
-The current implementation runs a new Prefect flow for each message. This demonstrates:
-- Real Prefect flow execution (not simulation)
-- Task orchestration with proper logging
-- WebSocket integration for real-time updates
-- Session-based flow management
-
-Each message triggers a complete flow run visible in the Prefect dashboard.
-
-### Advanced Implementation (main.py)
-
-The advanced implementation (available but not active) includes:
-- True pause/resume functionality using `pause_flow_run()`
-- Persistent flow state across messages
-- Typed input collection during pause
-- Conversation history tracking
-
-To switch between implementations, update `docker-compose.yml`:
-```yaml
-# For pause/resume (current):
-command: uv run uvicorn app.main_final:app --host 0.0.0.0 --port 8000 --reload
-
-# For simple flow-per-message:
-command: uv run uvicorn app.main_simple:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Note: Full pause/resume requires Prefect Cloud or a configured Prefect Server with proper state persistence.
 
 ## Project Structure
 
 ```
 chat-agent-prefect/
 ├── backend/
-│   └── app/
-│       ├── main_final.py     # Current: True pause/resume flows
-│       ├── main_simple.py    # Alternative: Simple flow-per-message
-│       └── flows_pause_resume.py  # Flow definitions
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── main.py           # FastAPI backend
+│   │   └── flows/
+│   │       ├── __init__.py
+│   │       └── chat_flow.py  # Prefect flow with tasks
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   └── uv.lock
 ├── frontend/
-│   └── app/
-│       └── simple-chat.tsx   # React chat component
+│   ├── app/
+│   │   ├── page.tsx
+│   │   └── simple-chat.tsx   # React chat component
+│   ├── Dockerfile
+│   ├── package.json
+│   └── ...
 ├── docker-compose.yml        # Service orchestration
-├── test_pause_resume.py      # Test script for pause/resume
-└── README.md
+├── test_pause_resume.py      # Test script
+├── README.md
+└── .gitignore
 ```
 
 ## Development
@@ -133,3 +122,4 @@ To test the pause/resume functionality:
 - Messages resume the flow with typed input via Prefect's API
 - The system demonstrates real-world human-in-the-loop workflows
 - Flow state is maintained by Prefect Server with PostgreSQL backend
+- Status updates are sent directly from Prefect flow tasks to the frontend via WebSocket
