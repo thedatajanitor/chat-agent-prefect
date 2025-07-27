@@ -1,0 +1,79 @@
+services:
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chat-agent-backend
+    environment:
+      - PREFECT_API_URL=http://prefect:4200/api
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - prefect
+      - postgres
+    networks:
+      - chat-agent-network
+    command: uv run uvicorn app.main_final:app --host 0.0.0.0 --port 8000 --reload
+
+  # Assistant UI Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chat-agent-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - WATCHPACK_POLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    networks:
+      - chat-agent-network
+    command: npm run dev
+
+  # Prefect Server
+  prefect:
+    image: prefecthq/prefect:3-python3.11
+    container_name: prefect-server
+    command: prefect server start
+    environment:
+      - PREFECT_UI_API_URL=http://localhost:4200/api
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+      - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://prefect:prefect@postgres:5432/prefect
+    ports:
+      - "4200:4200"
+    depends_on:
+      - postgres
+    networks:
+      - chat-agent-network
+
+  # PostgreSQL for Prefect
+  postgres:
+    image: postgres:15
+    container_name: prefect-postgres
+    environment:
+      - POSTGRES_USER=prefect
+      - POSTGRES_PASSWORD=prefect
+      - POSTGRES_DB=prefect
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - chat-agent-network
+
+volumes:
+  postgres_data:
+
+networks:
+  chat-agent-network:
+    driver: bridge
